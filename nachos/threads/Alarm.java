@@ -1,6 +1,9 @@
 package nachos.threads;
 
+import java.util.PriorityQueue;
+
 import nachos.machine.*;
+import nachos.threads.Alarm.WaitTime;
 
 /**
  * Uses the hardware timer to provide preemption, and to allow threads to sleep
@@ -20,6 +23,7 @@ public class Alarm {
 				timerInterrupt();
 			}
 		});
+		alarmPQ = new PriorityQueue<WaitTime>();
 	}
 
 	/**
@@ -29,7 +33,14 @@ public class Alarm {
 	 * should be run.
 	 */
 	public void timerInterrupt() {
-		KThread.currentThread().yield();
+
+		boolean intStatus = Machine.interrupt().disable();
+		
+		while(!alarmPQ.isEmpty() && (alarmPQ.peek().wakeTime <= Machine.timer().getTime())){
+			WaitTime thread = alarmPQ.remove();
+			thread.waitThread.ready();
+		}
+		Machine.interrupt().restore(intStatus);
 	}
 
 	/**
@@ -45,9 +56,39 @@ public class Alarm {
 	 * @see nachos.machine.Timer#getTime()
 	 */
 	public void waitUntil(long x) {
-		// for now, cheat just to get something working (busy waiting is bad)
+		boolean intStatus = Machine.interrupt().disable();
 		long wakeTime = Machine.timer().getTime() + x;
-		while (wakeTime > Machine.timer().getTime())
-			KThread.yield();
+
+		WaitTime thread = new WaitTime(KThread.currentThread(), wakeTime);
+		alarmPQ.add(thread);
+		KThread.sleep();
+
+		Machine.interrupt().restore(intStatus);
 	}
+	 public class WaitTime implements Comparable<WaitTime> {
+		 /**
+	    	  * Allocate a new WaitTime with a KThread and its wakeTime 	  
+	   	  *  
+	    	  */
+
+		public WaitTime(KThread waitThread, long wakeTime){
+			this.waitThread = waitThread;
+			this.wakeTime = wakeTime;
+		}
+		
+		 /**
+	    	  * Use Java's Long compareTo method to compare the wakeTimes of "this" WaitTime  
+	   	  *  and another WaitTime object
+	    	  */
+
+		public int compareTo(WaitTime other){
+			return (new Long(this.wakeTime).compareTo(new Long(other.wakeTime)));
+		}
+
+		//Instance variables for WaitTime class
+		private KThread waitThread;
+		private long wakeTime;
+	     }
+	private PriorityQueue<WaitTime> alarmPQ;
+
 }
