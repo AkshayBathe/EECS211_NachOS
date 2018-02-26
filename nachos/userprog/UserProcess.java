@@ -3,12 +3,6 @@ package nachos.userprog;
 import nachos.machine.*;
 import nachos.threads.*;
 import nachos.userprog.*;
-import nachos.userprog.UserProcess.NachosFatalException;
-import nachos.userprog.UserProcess.NachosFileSystemException;
-import nachos.userprog.UserProcess.NachosIllegalArgumentException;
-import nachos.userprog.UserProcess.NachosInternalException;
-import nachos.userprog.UserProcess.NachosOutOfFileDescriptorsException;
-import nachos.userprog.UserProcess.NachosVirtualMemoryException;
 
 import java.io.EOFException;
 
