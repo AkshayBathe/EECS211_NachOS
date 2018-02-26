@@ -3,6 +3,12 @@ package nachos.userprog;
 import nachos.machine.*;
 import nachos.threads.*;
 import nachos.userprog.*;
+import nachos.userprog.UserProcess.NachosFatalException;
+import nachos.userprog.UserProcess.NachosFileSystemException;
+import nachos.userprog.UserProcess.NachosIllegalArgumentException;
+import nachos.userprog.UserProcess.NachosInternalException;
+import nachos.userprog.UserProcess.NachosOutOfFileDescriptorsException;
+import nachos.userprog.UserProcess.NachosVirtualMemoryException;
 
 import java.io.EOFException;
 
@@ -23,6 +29,12 @@ public class UserProcess {
 	 * Allocate a new process.
 	 */
 	public UserProcess() {
+		this.openFiles = new OpenFile[16];
+
+        // set stdin and stdout handlers properly
+        this.openFiles[0] = UserKernel.console.openForReading();
+        this.openFiles[1] = UserKernel.console.openForWriting();
+        
 		int numPhysPages = Machine.processor().getNumPhysPages();
 		pageTable = new TranslationEntry[numPhysPages];
 		for (int i = 0; i < numPhysPages; i++)
@@ -238,10 +250,8 @@ public class UserProcess {
 			return false;
 		}
 
-		// program counter initially points at the program entry point
 		initialPC = coff.getEntryPoint();
 
-		// next comes the stack; stack pointer initially points to top of it
 		numPages += stackPages;
 		initialSP = numPages * pageSize;
 
@@ -410,16 +420,217 @@ public class UserProcess {
 	 * @return the value to be returned to the user.
 	 */
 	public int handleSyscall(int syscall, int a0, int a1, int a2, int a3) {
-		switch (syscall) {
-		case syscallHalt:
-			return handleHalt();
-
-		default:
-			Lib.debug(dbgProcess, "Unknown syscall " + syscall);
-			Lib.assertNotReached("Unknown system call!");
-		}
-		return 0;
+		try {
+            switch (syscall) {
+                case syscallHalt:
+                    return handleHalt();
+                case syscallCreate:
+                    return handleCreate(a0);
+                case syscallOpen:
+                    return handleOpen(a0);
+                case syscallRead:
+                    return handleRead(a0, a1, a2);
+                case syscallWrite:
+                    return handleWrite(a0, a1, a2);
+                case syscallClose:
+                    return handleClose(a0);
+                case syscallUnlink:
+                    return handleUnlink(a0);
+                default:
+                    Lib.debug(dbgProcess, "Unknown syscall " + syscall);
+                    Lib.assertNotReached("Unknown system call!");
+            }
+        } catch (final NachosIllegalArgumentException e) {
+            return -1;
+        } catch (final NachosOutOfFileDescriptorsException e) {
+            return -1;
+        } catch (final NachosFileSystemException e) {
+            return -1;
+        } catch (final NachosVirtualMemoryException e) {
+            return -1;
+        } catch (final NachosInternalException e) {
+            Lib.assertNotReached("This should never happen.");
+        }
+        return 0;
 	}
+	
+	private int getUnusedFileDescriptor() throws NachosInternalException {
+        for (int i = 0; i < this.openFiles.length; ++i) {
+            if (this.openFiles[i] == null) {
+                return i;
+            }
+        }
+        throw new NachosOutOfFileDescriptorsException("No file descriptors.");
+    }
+
+    /**
+     * Handle the create(char *name) system call.
+     */
+    private int handleCreate(final int pName) throws NachosInternalException {
+
+        final String fileName = readVirtualMemoryString(pName, 256);
+
+        // Is the fileName valid?
+        if (fileName == null || fileName.length() == 0) {
+            throw new NachosIllegalArgumentException("Invalid filename for creat()");
+        }
+
+        // Do we already have a file descriptor for a file with the same name?
+        for (int i = 0; i < this.openFiles.length; ++i) {
+            if (this.openFiles[i] != null && this.openFiles[i].getName().equals(fileName)) {
+                return i;
+            }
+        }
+
+        // Find an empty slot in the file descriptor table
+        final int fileDescriptor = this.getUnusedFileDescriptor();
+
+        // Are we out of file descriptors?
+
+        final OpenFile file = ThreadedKernel.fileSystem.open(fileName, true);
+
+        // Was the file successfully created?
+        if (file == null) {
+            throw new NachosFileSystemException("Unable to create file: " + fileName);
+        }
+
+        // Add this openFile to openFiles
+        this.openFiles[fileDescriptor] = file;
+
+        // return the new fileDescriptor
+        return fileDescriptor;
+    }
+    private int handleOpen(final int pName) throws NachosInternalException {
+        final int fileDescriptor = this.getUnusedFileDescriptor();
+
+        final String fileName = readVirtualMemoryString(pName, 256);
+        if (fileName == null || fileName.length() == 0) {
+            throw new NachosIllegalArgumentException("Invalid filename for open()");
+        }
+
+        final OpenFile file = ThreadedKernel.fileSystem.open(fileName, false);
+        if (file == null) {
+            throw new NachosFileSystemException("Unable to open file: " + fileName);
+        }
+
+        // Add this openFile to openFiles
+        this.openFiles[fileDescriptor] = file;
+
+        // return the new fileDescriptor
+        return fileDescriptor;
+    }
+    
+    private int handleRead(final int fileDescriptor, final int pBuffer, final int count)
+            throws NachosInternalException {
+        // check count is a valid arg
+        if (count < 0) {
+            throw new NachosIllegalArgumentException("Count must be non-negative for read()");
+        }
+        // Make sure FD is valid
+        if (fileDescriptor < 0 ||
+                fileDescriptor >= this.openFiles.length ||
+                openFiles[fileDescriptor] == null) {
+            throw new NachosIllegalArgumentException("Invalid file descriptor passed to read()");
+        }
+
+        final OpenFile file = this.openFiles[fileDescriptor];
+
+        final byte[] tmp = new byte[count];
+        final int numBytesRead = file.read(tmp, 0, count);
+        final int numBytesWritten = writeVirtualMemory(pBuffer, tmp, 0, numBytesRead);
+
+        if (numBytesRead != numBytesWritten) {
+            throw new NachosVirtualMemoryException("Expected to write " +
+                    numBytesRead +
+                    " bytes into virtual memory, but actually wrote " +
+                    numBytesWritten
+            );
+        }
+
+        return numBytesRead;
+
+    }
+    private int handleWrite(final int fileDescriptor, final int pBuffer, final int count)
+            throws NachosInternalException {
+        // check if count is a valid arg
+        if (count < 0) {
+            throw new NachosIllegalArgumentException("Count must be non-negative for write().");
+        }
+        // Make sure FD is valid
+        if (fileDescriptor < 0 ||
+                fileDescriptor >= this.openFiles.length ||
+                openFiles[fileDescriptor] == null) {
+            throw new NachosIllegalArgumentException("Invalid file descriptor passed to write()");
+        }
+
+        final OpenFile file = this.openFiles[fileDescriptor];
+
+        final byte[] tmp = new byte[count];
+        final int numBytesToWrite = readVirtualMemory(pBuffer, tmp);
+
+        if (numBytesToWrite != count) {
+            throw new NachosVirtualMemoryException("Expected to read " +
+                    count +
+                    " bytes from virtual memory, but actually wrote " +
+                    numBytesToWrite
+            );
+        }
+
+
+        return file.write(tmp, 0, numBytesToWrite);
+
+
+    }
+    private int handleClose(final int fileDescriptor) throws NachosInternalException {
+        //check if file descriptor exists and then that 
+        if (fileDescriptor < 0 || fileDescriptor > 15) {
+            throw new NachosIllegalArgumentException("Invalid file descriptor passed to close()");
+        }
+
+        //set file to file referred to by file descriptor
+        OpenFile file = openFiles[fileDescriptor];
+
+        //check that the file is still open
+        if (file == null) {
+            throw new NachosFileSystemException("There is no open file with the given file descriptor passed to close()");
+        }
+
+        //close the file
+        openFiles[fileDescriptor] = null;
+        file.close();
+
+        return 0;
+    }
+    
+
+    /**
+     * Handle unlinking a file
+     */
+    private int handleUnlink(final int pName) throws NachosInternalException {
+        //get the file from memory
+        String fileName = readVirtualMemoryString(pName, 256);
+
+        //check that the file has a legitimate name and length
+        if (fileName == null || fileName.length() <= 0) {
+            throw new NachosIllegalArgumentException("Invalid file name for unlink()");
+        }
+
+        // Invalidate any file descriptors for this file for the current process
+        for (int i = 0; i < openFiles.length; i++) {
+            if ((openFiles[i] != null) && (openFiles[i].getName().equals(fileName))) {
+                openFiles[i] = null;
+                // If we change the behavior
+                break;
+            }
+        }
+
+        if (!ThreadedKernel.fileSystem.remove(fileName)) {
+            throw new NachosFileSystemException("Unable to unlink file: " + fileName);
+        }
+        return 0;
+    }
+    
+    
 
 	/**
 	 * Handle a user exception. Called by <tt>UserKernel.exceptionHandler()</tt>
@@ -448,6 +659,59 @@ public class UserProcess {
 			Lib.assertNotReached("Unexpected exception");
 		}
 	}
+	
+	// exceptions 
+	
+	public static abstract class NachosInternalException extends RuntimeException {
+        public NachosInternalException(final String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Thrown when a syscall receives an illegal argument.
+     */
+    private final class NachosIllegalArgumentException extends NachosInternalException {
+        public NachosIllegalArgumentException(final String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Thrown when a syscall needs to create a new file descriptor, but has used all available FDs.
+     */
+    private final class NachosOutOfFileDescriptorsException extends NachosInternalException {
+        public NachosOutOfFileDescriptorsException(final String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Thrown when there is an error with the fileSystem.
+     */
+    private final class NachosFileSystemException extends NachosInternalException {
+        public NachosFileSystemException(final String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Thrown when there is an error with the virtual memory subsystem.
+     */
+    private final class NachosVirtualMemoryException extends NachosInternalException {
+        public NachosVirtualMemoryException(final String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Thrown when there is a user space exception that requires killing the running process.
+     */
+    private final class NachosFatalException extends NachosInternalException {
+        public NachosFatalException(final String message) {
+            super(message);
+        }
+    }
 
 	/** The program being run by this process. */
 	protected Coff coff;
@@ -468,4 +732,6 @@ public class UserProcess {
 	private static final int pageSize = Processor.pageSize;
 
 	private static final char dbgProcess = 'a';
+	
+	private final OpenFile[] openFiles;
 }
